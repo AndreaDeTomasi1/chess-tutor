@@ -9,7 +9,7 @@ build/
 # Eseguibile Stockfish scaricato in locale: non va versionato,
 # lo ricrea lo script di installazione ad ogni clone
 engines/stockfish
-engines/stockfish.exe
+engines/stockfish*.exe
 
 .vscode/*
 !.vscode/settings.json
