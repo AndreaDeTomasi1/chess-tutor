@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "chess-tutor"
+version = "0.1.0"
+description = "Tutor di scacchi locale con Stockfish: GUI Tkinter, nessuna connessione internet richiesta"
+authors = ["Il tuo nome <tuo@email.com>"]
+readme = "README.md"
+packages = [{ include = "chess_tutor", from = "src" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+chess = "^1.11.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+black = "^24.0.0"
+
+[tool.poetry.scripts]
+chess-tutor = "chess_tutor.__main__:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

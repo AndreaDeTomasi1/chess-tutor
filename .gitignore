@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+
+# Eseguibile Stockfish scaricato in locale: non va versionato,
+# lo ricrea lo script di installazione ad ogni clone
+engines/stockfish
+engines/stockfish.exe
+
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
