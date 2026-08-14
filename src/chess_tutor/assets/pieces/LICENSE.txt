@@ -1,0 +1,13 @@
+Set di pezzi scacchistici "cburnett"
+Autore: Colin M.L. Burnett
+Licenza: Creative Commons Attribution-ShareAlike 3.0 Unported (CC BY-SA 3.0)
+https://creativecommons.org/licenses/by-sa/3.0/
+
+Queste immagini sono state generate a partire dai file SVG del set
+"cburnett" inclusi nella libreria python-chess (modulo chess.svg),
+lo stesso set usato da Lichess.org.
+
+In quanto opera derivata sotto CC BY-SA, questi file mantengono la
+stessa licenza: puoi usarli, modificarli e ridistribuirli anche per
+scopi commerciali, a condizione di mantenere l'attribuzione e di
+distribuire eventuali opere derivate con la stessa licenza.

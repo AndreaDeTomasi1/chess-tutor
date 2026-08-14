@@ -5,6 +5,7 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
+.env
 
 # Eseguibile Stockfish scaricato in locale: non va versionato,
 # lo ricrea lo script di installazione ad ogni clone

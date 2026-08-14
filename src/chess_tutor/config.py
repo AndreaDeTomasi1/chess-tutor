@@ -11,6 +11,10 @@ import platform
 import shutil
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def _project_root() -> Path:
     # src/chess_tutor/config.py -> project root risalendo di 3 livelli
