@@ -1,4 +1,4 @@
-from chess_tutor.gui import ChessTutorApp
+from chess_tutor.app import ChessTutorApp
 
 
 def main():

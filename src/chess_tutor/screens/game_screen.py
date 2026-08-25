@@ -1,166 +1,39 @@
-"""Interfaccia grafica del Chess Tutor.
-
-- Scacchiera disegnata con Canvas Tkinter + pezzi caricati da immagini
-  PNG statiche (set "cburnett", licenza CC-BY-SA 3.0 - Colin M.L.
-  Burnett), pre-renderizzate ad alta risoluzione e incluse in
-  assets/pieces/. Nessuna libreria di sistema richiesta: solo Pillow
-  per ridimensionarle.
-- Layout a tre colonne: a sinistra l'elenco delle mosse giocate (con
-  valutazione in centipawn), al centro la scacchiera (resta centrata
-  nello spazio disponibile anche ridimensionando la finestra), a
-  destra i controlli (colore, modalita', difficolta', nuova partita,
-  pannello tutor).
-- Finestra ridimensionabile: trascinando il bordo la scacchiera e i
-  pezzi si riscalano automaticamente (con un piccolo debounce per non
-  ri-ridimensionare le immagini ad ogni pixel durante il trascinamento).
-- Click-to-move: primo click seleziona il pezzo ed evidenzia le mosse
-  legali (pallino per mosse "quiete", anello rosso per le catture),
-  secondo click esegue la mossa se valida.
-- Colore del giocatore selezionabile (Bianco/Nero): la scacchiera si
-  orienta di conseguenza e, se il giocatore e' Nero, il motore apre
-  la partita.
-- Modalita' selezionabile: "Contro motore" (il motore risponde ad ogni
-  mossa) oppure "Solo (studio)" per muovere entrambi i lati liberamente
-  senza risposta automatica del motore.
-- L'ultima mossa giocata (da chiunque) resta evidenziata sulla
-  scacchiera.
-- Difficolta' dell'avversario regolabile con uno slider (Skill Level 0-20),
-  disabilitato in modalita' solo.
-- Pannello tutor: la valutazione della posizione e' sempre visibile.
-  La mossa migliore puo' essere rivelata a richiesta (pulsante) oppure
-  mostrata automaticamente, sia come testo sia come freccia sulla
-  scacchiera, attivando l'apposita casella di spunta.
-
-Dipendenza aggiuntiva rispetto alla versione originale:
-    poetry add pillow
-(serve solo per ridimensionare i PNG dei pezzi alla dimensione corrente
-della scacchiera; nessuna libreria nativa esterna necessaria)
-"""
+"""Schermata di gioco (contro motore o in solo/studio)."""
 
 import threading
-from pathlib import Path
 
 import tkinter as tk
 from tkinter import messagebox
 
 import chess
-from PIL import Image, ImageTk
 
-from .engine_manager import EngineManager
-
-ASSETS_DIR = Path(__file__).resolve().parent / "assets" / "pieces"
-
-MIN_SQUARE_SIZE = 36
-DEFAULT_SQUARE_SIZE = 64
-LEFT_PANEL_WIDTH = 220   # elenco mosse
-RIGHT_PANEL_WIDTH = 260  # controlli + pannello tutor
-
-LIGHT_COLOR = "#eeeed2"
-DARK_COLOR = "#769656"
-SELECT_COLOR = "#f6f669"
-MOVE_HINT_COLOR = "#8ab4f8"
-CAPTURE_HINT_COLOR = "#eb5757"
-LAST_MOVE_LIGHT = "#cdd26a"
-LAST_MOVE_DARK = "#aaa23a"
-BEST_MOVE_COLOR = "#e08f28"
-
-INITIAL_PIECE_COUNTS = {
-    chess.PAWN: 8,
-    chess.KNIGHT: 2,
-    chess.BISHOP: 2,
-    chess.ROOK: 2,
-    chess.QUEEN: 1,
-    chess.KING: 1,
-}
-CAPTURED_PIECE_SIZE = 24
-CAPTURED_PADDING = 4
-
-RESIZE_DEBOUNCE_MS = 150  # attesa dopo l'ultimo evento di resize prima di ridisegnare
+from ..chess_utils import (
+    LEFT_PANEL_WIDTH, RIGHT_PANEL_WIDTH, MIN_SQUARE_SIZE, DEFAULT_SQUARE_SIZE,
+    ASSETS_DIR, RESIZE_DEBOUNCE_MS, CAPTURED_PIECE_SIZE, CAPTURED_PADDING,
+    LIGHT_COLOR, DARK_COLOR, SELECT_COLOR, MOVE_HINT_COLOR, CAPTURE_HINT_COLOR,
+    LAST_MOVE_LIGHT, LAST_MOVE_DARK, BEST_MOVE_COLOR,
+)
+from ..chess_utils import get_captured_pieces
+from ..engine_manager import EngineManager
+from ..tutor_explainer import TutorExplainer
+from ..widgets.piece_cache import PieceImageCache
 
 
-def _asset_filename(piece: chess.Piece) -> str:
-    color = "w" if piece.color == chess.WHITE else "b"
-    return f"{color}{piece.symbol().upper()}.png"  # es. wN.png, bQ.png
+class GameScreen(tk.Frame):
+    MODE_LABELS = {"engine": "Contro motore", "solo": "Solo (studio)"}
 
-def get_captured_pieces(board: chess.Board):
-    """Ritorna { chess.WHITE: [chess.Piece,...], chess.BLACK: [chess.Piece,...] }
-    cioe' i pezzi che ciascun colore ha PERSO (= catturati dall'avversario),
-    dedotti confrontando i pezzi ancora presenti con il conteggio iniziale."""
-    remaining = {chess.WHITE: {}, chess.BLACK: {}}
-    for square in chess.SQUARES:
-        piece = board.piece_at(square)
-        if piece:
-            remaining[piece.color][piece.piece_type] = (
-                remaining[piece.color].get(piece.piece_type, 0) + 1
-            )
-
-    captured = {chess.WHITE: [], chess.BLACK: []}
-    for color in (chess.WHITE, chess.BLACK):
-        for piece_type, initial_count in INITIAL_PIECE_COUNTS.items():
-            missing = initial_count - remaining[color].get(piece_type, 0)
-            for _ in range(missing):
-                captured[color].append(chess.Piece(piece_type, color))
-    return captured
-
-
-class PieceImageCache:
-    """Carica da disco i PNG dei pezzi (pre-renderizzati ad alta
-    risoluzione in assets/pieces/) e li ridimensiona con PIL alla
-    dimensione richiesta, mettendo in cache sia l'originale ad alta
-    risoluzione sia le versioni gia' scalate per ogni square_size usata."""
-
-    def __init__(self, assets_dir: Path):
-        self._assets_dir = assets_dir
-        self._originals = {}  # symbol -> PIL.Image ad alta risoluzione
-        self._scaled_cache = {}  # (symbol, size) -> ImageTk.PhotoImage
-
-    def _load_original(self, piece: chess.Piece) -> Image.Image:
-        symbol = piece.symbol()
-        original = self._originals.get(symbol)
-        if original is None:
-            path = self._assets_dir / _asset_filename(piece)
-            if not path.exists():
-                raise FileNotFoundError(
-                    f"Immagine pezzo mancante: {path}. "
-                    "Assicurati che la cartella assets/pieces/ sia distribuita col progetto."
-                )
-            original = Image.open(path).convert("RGBA")
-            self._originals[symbol] = original
-        return original
-
-    def get(self, piece: chess.Piece, size: int) -> ImageTk.PhotoImage:
-        key = (piece.symbol(), size)
-        cached = self._scaled_cache.get(key)
-        if cached is not None:
-            return cached
-
-        original = self._load_original(piece)
-        resized = original.resize((size, size), Image.LANCZOS)
-        photo = ImageTk.PhotoImage(resized)
-        self._scaled_cache[key] = photo
-        return photo
-
-    def clear(self):
-        self._scaled_cache.clear()
-
-
-class ChessTutorApp(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Chess Tutor - locale, offline")
-        self.resizable(True, True)
-        self.minsize(
-            LEFT_PANEL_WIDTH + RIGHT_PANEL_WIDTH + MIN_SQUARE_SIZE * 8 + 60,
-            MIN_SQUARE_SIZE * 8 + 40,
-        )
+    def __init__(self, parent, app, mode="engine", **kwargs):
+        super().__init__(parent, **kwargs)
+        self.app = app
+        self.mode = mode
+        self.solo_mode = (mode == "solo")
 
         self.board = chess.Board()
+        self.tutor_explainer = TutorExplainer()
         self.selected_square = None
 
-        # Stato di partita configurabile dai controlli a destra.
         self.player_is_white = True
-        self.solo_mode = False
-        self.board_flipped = False  # True quando il giocatore e' Nero
+        self.board_flipped = False
         self.last_move = None
         self._current_best_move = None
         self._current_eval_result = None
@@ -171,27 +44,23 @@ class ChessTutorApp(tk.Tk):
         self._board_offset = (0, 0)
 
         self.engine = EngineManager(think_time=0.4)
-        self.engine.set_difficulty(5)  # difficolta' iniziale bassa/media
+        self.engine.set_difficulty(5)
 
-        # self._start_layout()
         self._build_layout()
-        self.update_idletasks()  # forza il calcolo della geometria reale del canvas
+        self.update_idletasks()
         self._draw_board()
         self._draw_captured_pieces()
         self._update_tutor_panel(None)
 
     # ---------- UI ----------
 
-    def _start_layout(self):
-        container = tk.Frame(self)
-
     def _build_layout(self):
         container = tk.Frame(self)
         container.pack(fill="both", expand=True, padx=10, pady=10)
         container.rowconfigure(0, weight=1)
-        container.columnconfigure(0, weight=0)  # elenco mosse: larghezza fissa
-        container.columnconfigure(1, weight=1)  # scacchiera: si espande e resta centrata
-        container.columnconfigure(2, weight=0)  # controlli: larghezza fissa
+        container.columnconfigure(0, weight=0)
+        container.columnconfigure(1, weight=1)
+        container.columnconfigure(2, weight=0)
 
         self._build_moves_panel(container)
         self._build_board_canvas(container)
@@ -204,12 +73,15 @@ class ChessTutorApp(tk.Tk):
         left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
 
+        tk.Button(left, text="← Home", command=self._go_home).grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
         tk.Label(left, text="Mosse giocate", font=("TkDefaultFont", 10, "bold")).grid(
-            row=0, column=0, sticky="w", pady=(0, 4)
+            row=1, column=0, sticky="w", pady=(0, 4)
         )
 
         list_frame = tk.Frame(left)
-        list_frame.grid(row=1, column=0, sticky="nsew")
+        list_frame.grid(row=2, column=0, sticky="nsew")
         list_frame.rowconfigure(0, weight=1)
         list_frame.columnconfigure(0, weight=1)
 
@@ -226,25 +98,18 @@ class ChessTutorApp(tk.Tk):
         board_area = tk.Frame(container)
         board_area.grid(row=0, column=1, sticky="nsew")
         board_area.columnconfigure(0, weight=1)
-
-        # riga 0: catturati dal Nero (pezzi bianchi persi) -> sopra
-        # riga 1: la scacchiera -> si prende tutto lo spazio extra
-        # riga 2: catturati dal Bianco (pezzi neri persi) -> sotto
         board_area.rowconfigure(0, weight=0)
         board_area.rowconfigure(1, weight=1)
         board_area.rowconfigure(2, weight=0)
 
         self.canvas_captured_black = tk.Canvas(
-            board_area,
-            height=CAPTURED_PIECE_SIZE + CAPTURED_PADDING * 2,
+            board_area, height=CAPTURED_PIECE_SIZE + CAPTURED_PADDING * 2,
             highlightthickness=0,
         )
         self.canvas_captured_black.grid(row=0, column=0, sticky="ew")
 
         self.canvas = tk.Canvas(
-            board_area,
-            width=self.square_size * 8,
-            height=self.square_size * 8,
+            board_area, width=self.square_size * 8, height=self.square_size * 8,
             highlightthickness=0,
         )
         self.canvas.grid(row=1, column=0, sticky="nsew")
@@ -252,8 +117,7 @@ class ChessTutorApp(tk.Tk):
         self.canvas.bind("<Configure>", self._on_canvas_resize)
 
         self.canvas_captured_white = tk.Canvas(
-            board_area,
-            height=CAPTURED_PIECE_SIZE + CAPTURED_PADDING * 2,
+            board_area, height=CAPTURED_PIECE_SIZE + CAPTURED_PADDING * 2,
             highlightthickness=0,
         )
         self.canvas_captured_white.grid(row=2, column=0, sticky="ew")
@@ -262,21 +126,13 @@ class ChessTutorApp(tk.Tk):
         captured = get_captured_pieces(self.board)
         self._captured_images = []
 
-        # canvas_captured_black = fisicamente in alto (row 0)
-        # canvas_captured_white = fisicamente in basso (row 2)
-        # A seconda del flip, decidiamo quale canvas fisico sta "vicino al Nero"
-        # e quale "vicino al Bianco".
         if self.board_flipped:
-            # Nero gioca da sotto -> "vicino al Nero" = canvas in basso
             canvas_near_black = self.canvas_captured_white
             canvas_near_white = self.canvas_captured_black
         else:
-            # Bianco gioca da sotto -> "vicino al Nero" = canvas in alto
             canvas_near_black = self.canvas_captured_black
             canvas_near_white = self.canvas_captured_white
 
-        # vicino al Nero -> pezzi BIANCHI catturati
-        # vicino al Bianco -> pezzi NERI catturati
         for canvas, color in (
             (canvas_near_black, chess.WHITE),
             (canvas_near_white, chess.BLACK),
@@ -284,9 +140,7 @@ class ChessTutorApp(tk.Tk):
             canvas.delete("all")
             x = CAPTURED_PADDING
             order = [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT, chess.PAWN]
-            pieces_sorted = sorted(
-                captured[color], key=lambda p: order.index(p.piece_type)
-            )
+            pieces_sorted = sorted(captured[color], key=lambda p: order.index(p.piece_type))
             for piece in pieces_sorted:
                 photo = self.piece_cache.get(piece, CAPTURED_PIECE_SIZE)
                 self._captured_images.append(photo)
@@ -302,43 +156,26 @@ class ChessTutorApp(tk.Tk):
         side.grid(row=0, column=2, sticky="n", padx=(10, 0))
         side.grid_propagate(False)
 
-        # --- Colore del giocatore ---
+        tk.Label(
+            side, text=f"Modalità: {self.MODE_LABELS[self.mode]}",
+            font=("TkDefaultFont", 9, "bold"),
+        ).pack(anchor="w", pady=(0, 10))
+
         tk.Label(side, text="Colore giocatore", font=("TkDefaultFont", 9, "bold")).pack(
             anchor="w", pady=(0, 2)
         )
         self.color_var = tk.StringVar(value="white")
         color_frame = tk.Frame(side)
-        color_frame.pack(anchor="w", pady=(0, 6))
-        tk.Radiobutton(color_frame, text="Bianco", variable=self.color_var, value="white").pack(
-            side="left"
-        )
-        tk.Radiobutton(color_frame, text="Nero", variable=self.color_var, value="black").pack(
-            side="left"
-        )
-
-        # --- Modalita' ---
-        tk.Label(side, text="Modalita'", font=("TkDefaultFont", 9, "bold")).pack(
-            anchor="w", pady=(0, 2)
-        )
-        self.mode_var = tk.StringVar(value="engine")
-        mode_frame = tk.Frame(side)
-        mode_frame.pack(anchor="w", pady=(0, 2))
-        tk.Radiobutton(
-            mode_frame, text="Contro motore", variable=self.mode_var, value="engine"
-        ).pack(anchor="w")
-        tk.Radiobutton(
-            mode_frame, text="Solo (studio)", variable=self.mode_var, value="solo"
-        ).pack(anchor="w")
-        tk.Label(
-            side, text="(si applica premendo 'Nuova partita')",
-            font=("TkDefaultFont", 8), fg="gray",
-        ).pack(anchor="w", pady=(0, 10))
+        color_frame.pack(anchor="w", pady=(0, 10))
+        tk.Radiobutton(color_frame, text="Bianco", variable=self.color_var, value="white").pack(side="left")
+        tk.Radiobutton(color_frame, text="Nero", variable=self.color_var, value="black").pack(side="left")
 
         tk.Label(side, text="Difficolta' avversario (0-20)").pack(anchor="w")
         self.difficulty_var = tk.IntVar(value=5)
         self.difficulty_scale = tk.Scale(
             side, from_=0, to=20, orient=tk.HORIZONTAL, variable=self.difficulty_var,
             command=self._on_difficulty_change, length=200,
+            state="disabled" if self.solo_mode else "normal",
         )
         self.difficulty_scale.pack(anchor="w", pady=(0, 10))
 
@@ -356,15 +193,10 @@ class ChessTutorApp(tk.Tk):
             wraplength=RIGHT_PANEL_WIDTH - 20, justify="left",
         ).pack(anchor="w", pady=(10, 0))
 
-        tk.Label(side, text="Consiglio del tutor:").pack(anchor="w", pady=(10, 0))
-        self.tutor_text = tk.Text(side, width=28, height=8, wrap="word")
+        tk.Label(side, text="Spiegazione del tutor:").pack(anchor="w", pady=(10, 0))
+        self.tutor_text = tk.Text(side, width=28, height=12, wrap="word")
         self.tutor_text.pack(anchor="w")
         self.tutor_text.configure(state="disabled")
-
-        self.reveal_button = tk.Button(
-            side, text="Mostra mossa consigliata (una volta)", command=self._reveal_advice
-        )
-        self.reveal_button.pack(fill="x", pady=(6, 2))
 
     # ---------- Resize ----------
 
@@ -548,6 +380,8 @@ class ChessTutorApp(tk.Tk):
         self._play_player_move(move)
 
     def _play_player_move(self, move: chess.Move):
+        board_before = self.board.copy()
+        eval_before = self.engine.evaluate(board_before)
         san = self.board.san(move)  # va calcolato PRIMA di board.push()
         self.board.push(move)
         self.last_move = move
@@ -556,7 +390,12 @@ class ChessTutorApp(tk.Tk):
 
         result = self.engine.evaluate(self.board)
         self._record_move(san, result)
-        self._update_tutor_panel(result)
+        self._update_tutor_panel(
+            result,
+            board_before=board_before,
+            played_move=move,
+            eval_before=eval_before,
+        )
 
         self._check_game_over()
         if not self.solo_mode and not self.board.is_game_over():
@@ -581,7 +420,7 @@ class ChessTutorApp(tk.Tk):
         result = self.engine.evaluate(self.board)
         if san is not None:
             self._record_move(san, result)
-        self._update_tutor_panel(result)
+        self._update_tutor_panel(result, engine_move=True)
 
         self._check_game_over()
 
@@ -609,24 +448,58 @@ class ChessTutorApp(tk.Tk):
         if eval_result.score_cp is not None:
             return f"{eval_result.score_cp / 100:+.2f}"
         return "?"
+    
+    def _generate_tutor_explanation(
+        self,
+        board_before,
+        played_move,
+        eval_before,
+        eval_after_played,
+    ):
+        best_move = eval_before.best_move
+        if isinstance(eval_before.score_cp, str) or isinstance(eval_after_played.score_cp, str):
+            return 'sei vicino allo scacco matto!'
 
-    def _update_tutor_panel(self, eval_result):
+        return self.tutor_explainer.explain(
+            board_before=board_before,
+            played_move=played_move,
+            best_move=best_move,
+            eval_before_cp=eval_before.score_cp,
+            eval_after_played_cp=eval_after_played.score_cp,
+            eval_after_best_cp=None,
+        )
+
+    def _update_tutor_panel(self, eval_result, board_before=None, played_move=None, eval_before=None, engine_move=None):
         # La valutazione numerica resta sempre visibile. La mossa
         # migliore (testo + freccia) viene mostrata automaticamente solo
-        # se la casella "Mostra mossa migliore" e' attiva; altrimenti
-        # resta nascosta finche' non si preme il pulsante di rivelazione.
+        # se la casella "Mostra mossa migliore" e' attiva; inoltre
+        # c'è la spiegazione della posizione e della mossa
         self._current_eval_result = eval_result
         self.eval_label.configure(text=self._format_eval(eval_result))
 
         if self.show_best_move_var.get() and eval_result is not None and eval_result.best_move is not None:
             self._current_best_move = eval_result.best_move
-            self._set_tutor_text(f"Mossa consigliata: {self.board.san(eval_result.best_move)}")
-        else:
-            self._current_best_move = None
-            self._set_tutor_text(
-                "Mossa consigliata nascosta.\n"
-                "Premi 'Mostra mossa consigliata' oppure attiva la casella qui sopra."
+        
+        tutor_text = ""
+
+        if (
+            board_before is not None
+            and played_move is not None
+            and eval_before is not None
+            and eval_result is not None
+        ):
+            tutor_text = self._generate_tutor_explanation(
+                board_before,
+                played_move,
+                eval_before,
+                eval_result,
             )
+
+        if not engine_move:
+            self._set_tutor_text(
+                    tutor_text
+                )
+
         self._draw_board()
 
     def _on_show_best_move_toggle(self):
@@ -707,6 +580,26 @@ class ChessTutorApp(tk.Tk):
 
         result = self.engine.evaluate(self.board) if self.board.move_stack else None
         self._update_tutor_panel(result)
+
+    def _go_home(self):
+        self.app.show_screen("home")
+
+    def _new_game(self):
+        self.player_is_white = (self.color_var.get() == "white")
+        self.board_flipped = not self.player_is_white
+        # self.solo_mode e' fisso per l'intera schermata (deciso dalla Home)
+
+        self.board.reset()
+        self.selected_square = None
+        self.last_move = None
+        self._current_best_move = None
+        self._clear_move_list()
+        self._draw_captured_pieces()
+        self._draw_board()
+        self._update_tutor_panel(None)
+
+        if not self.solo_mode and not self.player_is_white and not self.board.is_game_over():
+            self.after(200, self._trigger_engine_move)
 
     def _check_game_over(self):
         if self.board.is_game_over():
